@@ -1,0 +1,22 @@
+version: '3.8'
+services:
+  pantilt:
+    build: .
+    runtime: nvidia
+    privileged: true          
+    network_mode: host
+    environment:
+      - DISPLAY=${DISPLAY}    
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw  
+      - ./src:/app/src                    
+    devices:
+      - /dev/video0:/dev/video0   
+      - /dev/gpiochip0:/dev/gpiochip0 
+      - /dev/gpiomem:/dev/gpiomem     
+
+    stdin_open: true
+    tty: true
+

@@ -1,0 +1,2 @@
+pyserial
+imutils==0.5.4

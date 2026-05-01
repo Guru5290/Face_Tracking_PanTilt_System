@@ -9,8 +9,8 @@ PAN_MIN    = 0
 PAN_MAX    = 180
 PAN_CENTER = 90
 
-TILT_MIN    = 40
-TILT_MAX    = 140
+TILT_MIN    = 75
+TILT_MAX    = 180
 TILT_CENTER = 90
 
 # --- Camera / Frame Settings ---
@@ -27,13 +27,13 @@ CAMERA_FLIP_METHOD = int(os.getenv('CAMERA_FLIP_METHOD', '0'))
 # KP: how aggressively to chase the face. Higher = faster pursuit, too high = oscillation
 # KI: corrects for steady-state offset. Keep very small to avoid windup drift
 # KD: dampens overshoot. Prevents the servo overshooting and hunting back and forth
-PAN_KP  = 0.05
+PAN_KP  = 0.03
 PAN_KI  = 0.0
 PAN_KD  = 0.004
 
-TILT_KP = 0.06
+TILT_KP = 0.04
 TILT_KI = 0.0
-TILT_KD = 0.005
+TILT_KD = 0.008
 
 # --- Dead zone: pixels from center to ignore (prevents micro-jitter when face is centred) ---
 DEAD_ZONE = 15
@@ -49,7 +49,7 @@ MAX_SERVO_DELTA_PER_FRAME = 3.5
 SERVO_MIN_COMMAND_DELTA   = 0.25
 
 # If face is lost briefly, hold last target before resetting control
-FACE_LOST_HOLD_SECONDS = 5.0
+FACE_LOST_HOLD_SECONDS = 2.0
 
 # --- Patrol Mode Settings ---
 PATROL_PAN_STEP   = 3

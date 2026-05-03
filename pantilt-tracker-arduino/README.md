@@ -263,36 +263,6 @@ track_00042.jpg,320,140,180,180
 
 Optional: `--iou-threshold 0.5` on `benchmark_detectors.py`.
 
-**Methodology notes**
-
-- Metrics pool TP/FP/FN over the dataset → precision/recall/F1 (not full mAP).
-- Images with **no** rows in `labels.csv` are treated as **zero faces** in GT (any detection → FP). Either label every frame that contains a face or remove empty-negative frames from the folder before benchmarking.
-- Latency is wall time per image per detector; keep Jetson power mode consistent between runs.
-
-### Artifacts for your report
-
-- `report_artifacts/detector_metrics.csv`
-- `report_artifacts/detector_comparison.png`
-- `report_artifacts/qualitative_examples/*.jpg`
-
-## Optional: static-only capture (no tracking)
-
-If you want frames **without** moving servos, use `capture_eval_dataset.py` in a **separate** run when nothing else uses the camera (`python3 src/capture_eval_dataset.py --help`).
-
-CSI problems (`Failed to create CaptureSession`): on the host run `sudo systemctl restart nvargus-daemon`, stop other camera apps, try `--width 1920 --height 1080 --fps 30`, or `--camera v4l2` with Docker `--device /dev/video0`. The script can fall back to V4L2 after CSI failure unless `--no-fallback-v4l2`.
-
-## Suggested report narrative
-
-1. **Data**: live tracking session → saved frames under `eval_sessions/…`.
-2. **Ground truth**: how `labels.csv` was produced (DNN seed + manual review recommended).
-3. **Metrics**: table/chart from `benchmark_detectors.py` comparing Haar, dlib HOG+SVM, OpenCV DNN.
-4. **Qualitative**: overlays + landmark screenshots from live stream.
-
-## One-line workflow recap
-
-1. `python3 src/main.py --eval-session …` (track + save frames)
-2. `prelabel_dataset.py` → `review_labels.py` on that session folder
-3. `benchmark_detectors.py --dataset-dir … --labels-csv …`
 
 ## Serial Protocol
 

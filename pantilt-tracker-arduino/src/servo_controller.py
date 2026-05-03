@@ -29,6 +29,10 @@ class ServoController:
 
         self.pan_angle  = PAN_CENTER
         self.tilt_angle = TILT_CENTER
+        self._last_pan_sent = None
+        self._last_tilt_sent = None
+        self._last_pan_send_ts = 0.0
+        self._last_tilt_send_ts = 0.0
 
         self.home()
 
@@ -40,12 +44,38 @@ class ServoController:
     def set_pan(self, angle):
         angle = max(PAN_MIN, min(PAN_MAX, float(angle)))
         self.pan_angle = angle
-        self._send(f'PAN:{int(angle)}')
+        now = time.time()
+        target = int(round(angle))
+        if self._last_pan_sent is None:
+            self._send(f'PAN:{target}')
+            self._last_pan_sent = target
+            self._last_pan_send_ts = now
+            return
+        if (now - self._last_pan_send_ts) < SERVO_SEND_MIN_INTERVAL_SEC:
+            return
+        if abs(target - self._last_pan_sent) < max(1, PAN_SEND_MIN_STEP_DEG):
+            return
+        self._send(f'PAN:{target}')
+        self._last_pan_sent = target
+        self._last_pan_send_ts = now
 
     def set_tilt(self, angle):
         angle = max(TILT_MIN, min(TILT_MAX, float(angle)))
         self.tilt_angle = angle
-        self._send(f'TILT:{int(angle)}')
+        now = time.time()
+        target = int(round(angle))
+        if self._last_tilt_sent is None:
+            self._send(f'TILT:{target}')
+            self._last_tilt_sent = target
+            self._last_tilt_send_ts = now
+            return
+        if (now - self._last_tilt_send_ts) < SERVO_SEND_MIN_INTERVAL_SEC:
+            return
+        if abs(target - self._last_tilt_sent) < max(1, TILT_SEND_MIN_STEP_DEG):
+            return
+        self._send(f'TILT:{target}')
+        self._last_tilt_sent = target
+        self._last_tilt_send_ts = now
 
     def home(self):
         # Return both servos to center position

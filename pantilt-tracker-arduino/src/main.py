@@ -1,82 +1,131 @@
-import cv2
+import argparse
 import sys
-import os
-import urllib.request
+
 from servo_controller import ServoController
-from face_centering  import FaceCenteringMode
-from patrol_mode     import PatrolMode
-from motion_tracking import MotionTrackingMode
+
+try:
+    from face_centering import FaceCenteringMode
+except ModuleNotFoundError as exc:
+    if getattr(exc, 'name', '') == 'dlib' or 'dlib' in str(exc):
+        sys.stderr.write(
+            '\nMissing Python package: dlib (required for landmarks and dlib face detector).\n\n'
+            'Fix one of:\n'
+            '  • Jetson host: sudo apt-get install -y cmake build-essential '
+            'libopenblas-base liblapack-dev && pip3 install dlib\n'
+            '  • Use the project Docker image (dlib is built there): see README "Build and Run (Docker)".\n\n'
+        )
+    raise
 from config import *
+from model_assets import ensure_runtime_models
+from camera_capture import open_camera, parse_v4l2_device, warmup_read
+from live_eval_capture import LiveEvalSession
 
-CASCADE_URL = ('https://raw.githubusercontent.com/opencv/opencv/master/'
-               'data/haarcascades/haarcascade_frontalface_default.xml')
 
-def download_cascade():
-    if not os.path.exists(FACE_CASCADE_PATH):
-        print('Downloading face cascade classifier ')
-        urllib.request.urlretrieve(CASCADE_URL, FACE_CASCADE_PATH)
-        print('done.')
-
-def gstreamer_pipeline(
-    width=FRAME_WIDTH, height=FRAME_HEIGHT, fps=30,
-    flip=CAMERA_FLIP_METHOD
-):
-    if flip not in range(8):
-        print(f'Invalid CAMERA_FLIP_METHOD={flip}, using 0')
-        flip = 0
-    return (
-        f"nvarguscamerasrc ! "
-        f"video/x-raw(memory:NVMM), width={width}, height={height}, "
-        f"format=NV12, framerate={fps}/1 ! "
-        f"nvvidconv flip-method={flip} ! "
-        f"video/x-raw, format=BGRx ! "
-        f"videoconvert ! "
-        f"video/x-raw, format=BGR ! "
-        f"appsink max-buffers=1 drop=true"
+def parse_args():
+    parser = argparse.ArgumentParser(description='Pan-tilt face tracking with optional live eval capture.')
+    parser.add_argument('--no-preview', action='store_true', help='Disable MJPEG preview stream')
+    parser.add_argument(
+        '--eval-session',
+        action='store_true',
+        help='Save clean camera frames during tracking (same session as tracker) for detector benchmarking',
     )
+    parser.add_argument('--eval-dir', default='eval_sessions', help='Base folder for live capture sessions')
+    parser.add_argument('--eval-every-n', type=int, default=15, help='Save one frame every N tracker loops')
+    parser.add_argument('--eval-max-frames', type=int, default=400, help='Maximum frames to save per session')
+    parser.add_argument(
+        '--static-image',
+        metavar='PATH',
+        default=None,
+        help='Run detector + landmarks on one image only (no camera, no Arduino). Use --static-save or --static-show.',
+    )
+    parser.add_argument(
+        '--static-save',
+        metavar='PATH',
+        default=None,
+        help='Write annotated JPEG from --static-image (recommended on headless / Docker)',
+    )
+    parser.add_argument(
+        '--static-show',
+        action='store_true',
+        help='Open an OpenCV window for --static-image (needs a display)',
+    )
+    parser.add_argument(
+        '--print-fps',
+        action='store_true',
+        help='Print processing FPS every second and show it on the MJPEG preview (or set PRINT_FPS=1)',
+    )
+    return parser.parse_args()
+
 
 def main():
-    download_cascade()
+    args = parse_args()
+    ensure_runtime_models()
 
-    print('\nPan-Tilt Tracking System')
-    print('1) Face Lock + Auto Scan Recovery')
-    print('2) Patrol Mode')
-    print('3) Motion Tracking')
+    print('\nPan-Tilt Face Tracking System')
 
-    choice = input('Select mode 1, 2 or 3: ').strip()
-    if choice not in ('1', '2', '3'):
-        print('Invalid choice. Exiting.')
-        sys.exit(1)
+    if args.static_image:
+        if args.eval_session:
+            print('Note: --eval-session is ignored with --static-image.', file=sys.stderr)
+        print('Mode: static image check (no camera, no Arduino)')
+        try:
+            FaceCenteringMode(None).check_static_image(
+                args.static_image,
+                save_path=args.static_save,
+                show_window=args.static_show,
+            )
+        except FileNotFoundError as exc:
+            print(exc, file=sys.stderr)
+            sys.exit(1)
+        return
 
-    # Here the camera is opened using GStreamer and nvarguscamerasrc for
-    # CSI camera using Jetson ISP via Argus
-    print(f'Camera flip-method: {CAMERA_FLIP_METHOD}')
-    cap = cv2.VideoCapture(gstreamer_pipeline(), cv2.CAP_GSTREAMER)
+    print('Mode: Face Lock + Auto Scan Recovery')
+
+    print(f'Camera backend: {CAMERA_BACKEND}, flip-method: {CAMERA_FLIP_METHOD}')
+    cap = open_camera(
+        backend=CAMERA_BACKEND,
+        v4l2_device=parse_v4l2_device(V4L2_DEVICE),
+        width=FRAME_WIDTH,
+        height=FRAME_HEIGHT,
+        fps=CAMERA_FPS,
+        flip=CAMERA_FLIP_METHOD,
+        sensor_id=CSI_SENSOR_ID,
+    )
 
     if not cap.isOpened():
-        print('The camera cannot be opened')
+        print('The camera cannot be opened. Set CAMERA_BACKEND=v4l2 or fix CSI/Argus.')
         sys.exit(1)
 
-    # Verify a real frame comes through
-    ret, test_frame = cap.read()
+    ret, test_frame = warmup_read(cap)
     print(f"Camera test: ret={ret}, shape={test_frame.shape if ret else 'None'}")
+    if not ret:
+        print('No valid frames from camera. Try CAMERA_BACKEND=v4l2 or restart nvargus-daemon.')
+        cap.release()
+        sys.exit(1)
     if ret and test_frame.mean() < 5:
         print("WARNING: Frame is nearly black/green -- pixel format issue")
 
-    # ServoController now communicates with Arduino Mega over USB serial
     servo = ServoController()
 
+    live_eval = None
+    if args.eval_session:
+        live_eval = LiveEvalSession(
+            base_dir=args.eval_dir,
+            every_n_frames=max(1, args.eval_every_n),
+            max_frames=max(1, args.eval_max_frames),
+        )
+
     try:
-        show = '--no-preview' not in sys.argv
-        if choice == '1':
-            FaceCenteringMode(servo).run(cap, show)
-        elif choice == '2':
-            PatrolMode(servo).run(cap, show)
-        elif choice == '3':
-            MotionTrackingMode(servo).run(cap, show)
+        FaceCenteringMode(servo).run(
+            cap,
+            show_preview=not args.no_preview,
+            live_eval_session=live_eval,
+            print_fps=args.print_fps or PRINT_FPS,
+        )
     except KeyboardInterrupt:
         print('\nStopped by user.')
     finally:
+        if live_eval is not None:
+            live_eval.close()
         cap.release()
         servo.cleanup()
         print('Servo moved to home position and serial port released.')

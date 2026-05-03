@@ -1,95 +1,73 @@
-# Pan-Tilt Tracker (Arduino + Jetson)
+# Pan-Tilt Face Tracking Camera System
 
-Rigid and stable pan-tilt tracking system with 3 working modes:
+This project is now focused only on face tracking for reporting and evaluation.
+It supports multiple face detectors (dlib HOG+SVM, Haar, OpenCV DNN), with dlib landmarks for robust tracking visualization.
 
-1. Face lock with auto scan recovery (PID-controlled, jitter-reduced)
-2. Patrol mode (scan pattern)
-3. Motion tracking (frame-difference tracking + idle sweep)
+## What Changed
 
-This project uses:
+- Removed motion tracking and patrol-only modes from the app flow
+- Added dlib HOG + SVM and OpenCV DNN detector backends for runtime tracking
+- Added dlib 68-point landmarks overlay for report screenshots
+- Kept Haar cascade as a benchmark baseline only
+- Added a detector comparison script with metrics + chart + qualitative images
 
-- Jetson + PiCamera V2 + OpenCV for vision
-- Arduino Mega for low-latency servo drive
-- Serial control (`PAN:<angle>`, `TILT:<angle>`)
+## Core Runtime Behavior
 
-## Features
+- Face found: lock and track with PID pan-tilt control
+- Face lost: auto-scan sweep
+- Face found again: immediate relock and continue tracking
 
-- Stable face lock with:
-  - PID control (`KP/KI/KD`)
-  - dead-zone to avoid micro-jitter
-  - moving-average smoothing of detected face coordinates
-  - servo step clamping per frame to reduce overshoot
-  - hold-before-reset logic when face is briefly lost
-  - automatic patrol scan while face is lost, with instant relock when found
-- Patrol mode:
-  - continuous left-right pan sweep
-  - periodic tilt stepping to cover vertical field
-- Motion tracking mode:
-  - contour-based motion detection from frame differences
-  - target center smoothing over recent detections
-  - automatic idle sweep when no motion is found
-- MJPEG preview stream available at `http://<jetson-ip>:8080/`
+## Detection Stack
+
+- Runtime detector options:
+  - `dlib`: dlib HOG + Linear SVM (CPU baseline)
+  - `opencv_dnn`: OpenCV SSD face detector (Jetson GPU-capable with CUDA backend)
+  - `haar`: Haar cascade baseline
+- Landmarks: dlib 68-point predictor (`shape_predictor_68_face_landmarks.dat`)
+- Baseline comparators for results section: OpenCV Haar + dlib HOG + OpenCV DNN
 
 ## Repository Layout
 
-- `src/main.py`: entry point and mode selection
-- `src/face_centering.py`: face lock mode
-- `src/patrol_mode.py`: patrol scan mode
-- `src/motion_tracking.py`: motion tracking mode
-- `src/servo_controller.py`: serial servo commands to Arduino
-- `src/stream_server.py`: shared MJPEG stream server
-- `src/config.py`: tuning/configuration values
+- `src/main.py`: face tracking entrypoint
+- `src/face_centering.py`: dlib face lock + landmarks + scan recovery
+- `src/servo_controller.py`: serial commands to Arduino
+- `src/stream_server.py`: MJPEG preview stream
+- `src/camera_capture.py`: open CSI (Argus) or V4L2 camera consistently
+- `src/model_assets.py`: runtime model download/decompression
+- `src/live_eval_capture.py`: save frames **during live tracking** for benchmarking
+- `src/capture_eval_dataset.py`: optional static-only capture (no servos / second camera session)
+- `src/prelabel_dataset.py`: auto-generate initial labels.csv
+- `src/review_labels.py`: fast OpenCV label reviewer/editor
+- `src/benchmark_detectors.py`: Haar vs dlib benchmark + plots
+- `src/config.py`: tuning and detection settings
 - `arduino/pan_tilt_servo.ino`: Arduino firmware
+
+Dependency files:
+
+- `requirements.txt` — tracker stack (`pyserial`, `imutils`, `dlib`, …); **no pip NumPy/Matplotlib** (use APT on Jetson per Troubleshooting).
+- `requirements-report.txt` — optional `matplotlib` for benchmark plots (also satisfied by `python3-matplotlib`).
 
 ## Hardware Requirements
 
-- NVIDIA Jetson board with CSI camera
-- Arduino Mega (or compatible serial Arduino)
-- 2x servos for pan + tilt
-- Pan-tilt bracket
-- Stable external 5V servo power supply (recommended)
-- Common ground shared between Arduino and servo power
-
-## Wiring
-
-Arduino firmware expects:
-
-- Pan servo signal: pin `9`
-- Tilt servo signal: pin `10`
-
-Important:
-
-- Servo power should not come from USB alone under load.
-- Tie grounds together (Jetson/Arduino/servo PSU) to avoid unstable behavior.
+- NVIDIA Jetson board + CSI camera
+- Arduino Mega (or compatible USB-serial Arduino)
+- 2 servos (pan + tilt)
+- External 5V servo supply (recommended)
+- Common ground between Arduino and servo supply
 
 ## Arduino Setup
 
-1. Open `arduino/pan_tilt_servo.ino` in Arduino IDE.
-2. Select board/port for Arduino Mega.
-3. Upload firmware.
-4. Keep baud at `115200` (must match `ARDUINO_BAUD` in `src/config.py`).
+1. Open `arduino/pan_tilt_servo.ino`
+2. Upload to Arduino Mega
+3. Ensure baud = `115200`
 
-## Jetson / Python - Working in a container
-
-### Docker 
+## Build and Run (Docker)
 
 ```bash
 docker build -t pantilt:latest .
-
-docker run --rm -it   --runtime=nvidia   --privileged   --device /dev/ttyACM0   --volume /tmp/argus_socket:/tmp/argus_socket   -p 8080:8080   pantilt:latest
-
 ```
 
-### Camera orientation / mirror control
-
-You can control camera orientation from Docker using `CAMERA_FLIP_METHOD`:
-
-- `0`: no flip (recommended if left/right is currently reversed)
-- `4`: horizontal mirror (use only if you intentionally want mirrored view)
-- `2`: rotate 180
-- `6`: vertical mirror
-
-Example (non-mirrored, normal left/right):
+Run face tracking:
 
 ```bash
 docker run --rm -it \
@@ -98,11 +76,13 @@ docker run --rm -it \
   --device /dev/ttyACM0 \
   --volume /tmp/argus_socket:/tmp/argus_socket \
   -e CAMERA_FLIP_METHOD=0 \
+  -e DETECTOR_BACKEND=opencv_dnn \
+  -e OPENCV_DNN_TARGET=cuda \
   -p 8080:8080 \
   pantilt:latest
 ```
 
-Example (intentionally mirrored):
+CPU baseline run (for comparison):
 
 ```bash
 docker run --rm -it \
@@ -110,68 +90,209 @@ docker run --rm -it \
   --privileged \
   --device /dev/ttyACM0 \
   --volume /tmp/argus_socket:/tmp/argus_socket \
-  -e CAMERA_FLIP_METHOD=4 \
+  -e CAMERA_FLIP_METHOD=0 \
+  -e DETECTOR_BACKEND=dlib \
   -p 8080:8080 \
   pantilt:latest
 ```
 
-Tip: the app prints `Camera flip-method: X` at startup so you can confirm active mode.
-
-## Running the System
-
-Start:
+**Static photo check** (detector + landmarks, no camera or Arduino; needs NVIDIA runtime if OpenCV is CUDA-linked):
 
 ```bash
-python3 src/main.py
+docker run --rm -it \
+  --runtime=nvidia \
+  --privileged \
+  -v "$(pwd):/work" \
+  -e DETECTOR_BACKEND=opencv_dnn \
+  -e OPENCV_DNN_TARGET=cuda \
+  pantilt:latest \
+  python3 src/main.py --static-image /work/my_photo.jpg --static-save /work/annotated.jpg
 ```
 
-Mode options:
+Use `--static-show` only when a display is available (e.g. native `python3 src/main.py` on a desktop).
 
-- `1`: Face lock + auto scan recovery
-- `2`: Patrol mode
-- `3`: Motion tracking
+Preview stream:
 
-To disable the stream preview :
+- `http://<jetson-ip>:8080/`
+
+**Processing FPS (live):** use `python3 src/main.py --print-fps` or set **`PRINT_FPS=1`** (e.g. Docker `-e PRINT_FPS=1`). Logs once per second; the MJPEG preview shows the same value in the **bottom-right** (large white text with black outline — wait ~1s for the first number; until then you’ll see `--- FPS`). This rate is the full loop, not the camera’s nominal FPS alone. Switch `DETECTOR_BACKEND` among `haar`, `dlib`, and `opencv_dnn` to compare.
+
+**Processing FPS (offline, all three detectors):** `benchmark_detectors.py` writes `fps` and `avg_latency_ms` per detector to `detector_metrics.csv`.
+
+## Camera Mirror/Orientation
+
+Use `CAMERA_FLIP_METHOD`:
+
+- `0`: no flip
+- `2`: rotate 180
+- `4`: horizontal mirror
+- `6`: vertical mirror
+
+## Runtime Model Files
+
+On first run, the app auto-downloads:
+
+- Haar cascade XML
+- dlib `shape_predictor_68_face_landmarks.dat` (downloaded as `.bz2`, then decompressed)
+- OpenCV DNN face model (`deploy.prototxt` + `res10_300x300_ssd_iter_140000.caffemodel`)
+
+## Face Tracking Tuning (in `src/config.py`)
+
+- `PAN_KP`, `TILT_KP`: response speed
+- `PAN_KD`, `TILT_KD`: damping for overshoot
+- `DEAD_ZONE`: center tolerance to reduce jitter
+- `SMOOTH_FRAMES`: face center smoothing window
+- `MAX_SERVO_DELTA_PER_FRAME`: max servo change each frame
+- `SERVO_MIN_COMMAND_DELTA`: suppress tiny servo commands
+- `LOCK_HOLD_ZONE`, `LOCK_BREAK_ZONE`: lock hysteresis (hold steady at center, move only when real shift is detected)
+- `ERROR_FILTER_ALPHA`: smoothing on center error (reduces servo chatter while locked)
+- `PAN_*` and `TILT_*` lock/filter/delta settings: axis-specific anti-jitter tuning (tilt can be stricter)
+- `SERVO_SEND_MIN_INTERVAL_SEC`, `PAN_SEND_MIN_STEP_DEG`, `TILT_SEND_MIN_STEP_DEG`: serial command debouncing to suppress micro-jitter
+- `FACE_LOST_HOLD_SECONDS`: delay before scan starts after missed face
+- `SEARCH_PAN_STEP`, `SEARCH_TILT_STEP`, `SEARCH_TILT_HOLD_STEPS`: scan pattern while face is lost
+- `DETECTOR_BACKEND`: `opencv_dnn`, `dlib`, or `haar`
+- `OPENCV_DNN_TARGET`: `cuda` or `cpu`
+- `OPENCV_DNN_CONFIDENCE_THRESHOLD`: OpenCV DNN detection confidence threshold
+
+## Report workflow (live tracking → metrics for Haar / dlib / OpenCV DNN)
+
+**Design:** One camera process runs face tracking. While it runs, you can save **clean frames** (no overlays) plus servo/detector metadata. Later, **`benchmark_detectors.py`** runs **all three detectors offline on those same saved images** and compares them using **`labels.csv`** as ground truth.
+
+You do **not** run two camera apps at once. Capture happens **inside** the tracker loop.
+
+### 1) Run tracking and record an evaluation session
+
+Example (native):
 
 ```bash
-python3 src/main.py --no-preview
+python3 src/main.py \
+  --eval-session \
+  --eval-dir eval_sessions \
+  --eval-every-n 15 \
+  --eval-max-frames 300
 ```
 
-## Stability and Rigidity Tuning
+Example (Docker — mount host folder so images persist):
 
-All tuning values are in `src/config.py`.
+```bash
+docker run --rm -it \
+  --runtime=nvidia \
+  --privileged \
+  --device /dev/ttyACM0 \
+  --volume /tmp/argus_socket:/tmp/argus_socket \
+  -v "$(pwd)/eval_sessions:/app/eval_sessions" \
+  -e DETECTOR_BACKEND=opencv_dnn \
+  -e OPENCV_DNN_TARGET=cuda \
+  -p 8080:8080 \
+  pantilt:latest \
+  python3 src/main.py --eval-session --eval-max-frames 300
+```
 
-### Face lock responsiveness
+What gets written:
 
-- `PAN_KP`, `TILT_KP`: increase for faster reaction, decrease if oscillation appears
-- `PAN_KD`, `TILT_KD`: increase to damp overshoot and hunting
-- `PAN_KI`, `TILT_KI`: keep low unless persistent offset exists
+- `eval_sessions/<timestamp>/track_00000.jpg ...` — raw frames during tracking (motion, pan/tilt, lighting as in operation)
+- `eval_sessions/<timestamp>/tracking_manifest.csv` — timestamp, pan/tilt, which detector was driving tracking, face locked flag, tracked bbox
 
-### Jitter reduction
+Set **`DETECTOR_BACKEND`** to whichever model you want **live** (often `opencv_dnn`). Benchmark still evaluates **all three** detectors on the saved frames once labels exist.
 
-- `DEAD_ZONE`: bigger value = less micro movement near center
-- `SMOOTH_FRAMES`: bigger value = smoother but slower target response
-- `MAX_SERVO_DELTA_PER_FRAME`: hard cap on per-frame servo movement
-- `SERVO_MIN_COMMAND_DELTA`: ignore tiny command changes
+### 2) Build ground-truth `labels.csv` for those frames
 
-### Lost target behavior
+Seed boxes with your strongest detector (recommended **`opencv_dnn`**), then correct mistakes in the reviewer:
 
-- `FACE_LOST_HOLD_SECONDS`: how long to hold state before controller reset
-- After this hold period, mode `1` automatically starts scan patrol and keeps scanning until a face is detected again.
+```bash
+python3 src/prelabel_dataset.py \
+  --dataset-dir eval_sessions/<timestamp> \
+  --output-csv labels.csv \
+  --detector opencv_dnn
+```
 
-### Motion mode sensitivity
+```bash
+python3 src/review_labels.py \
+  --dataset-dir eval_sessions/<timestamp> \
+  --labels-csv labels.csv
+```
 
-- `MIN_MOTION_AREA`: increase to ignore small noise
-- `MOTION_THRESHOLD`: increase to reduce false positives
-- `MOTION_BLUR_SIZE`: larger blur reduces sensor noise sensitivity
-- `MOTION_IDLE_SWEEP_SECONDS`: delay before idle sweep starts
+**Reporting note:** If labels come entirely from OpenCV DNN without human edits, that detector’s precision/recall vs itself will look artificially strong. For defensible results, **fix obvious boxes** in `review_labels.py`, or state clearly that labels are “reference-assisted” and interpret OpenCV DNN metrics cautiously.
 
-### Patrol pattern coverage
+### 3) Run detector benchmark (no camera — reads JPEGs from disk)
 
-- `PATROL_PAN_STEP`: horizontal scan speed
-- `PATROL_TILT_STEP`: vertical step size
-- `PATROL_TILT_HOLD_STEPS`: delay between vertical changes
-- `PATROL_STEP_DELAY`: loop delay for smoothness/CPU balance
+```bash
+python3 src/benchmark_detectors.py \
+  --dataset-dir eval_sessions/<timestamp> \
+  --labels-csv eval_sessions/<timestamp>/labels.csv \
+  --output-dir report_artifacts
+```
+
+### Docker: prelabel, review, and benchmark
+
+The L4T ML image’s OpenCV is **CUDA-linked**. `import cv2` loads CUDA libraries (for example `libcublas.so.10`). If you run the container **without** the NVIDIA runtime, you get `ImportError: libcublas.so.10: cannot open shared object file`. Pass **`--runtime=nvidia`** (and **`--privileged`** if that matches how you run the tracker) even for these disk-only steps.
+
+Use the **repository root** as the host working directory so the volume matches `--dataset-dir eval_sessions/<timestamp>`:
+
+```bash
+cd /path/to/pantilt-tracker-arduino
+docker run --rm -it \
+  --runtime=nvidia \
+  --privileged \
+  -v "$(pwd)/eval_sessions:/app/eval_sessions" \
+  pantilt:latest \
+  python3 src/prelabel_dataset.py \
+    --dataset-dir eval_sessions/<timestamp> \
+    --output-csv labels.csv \
+    --detector opencv_dnn
+```
+
+If your shell is already **`.../eval_sessions`** (the folder that contains `20260502_092655`), do **not** add another `eval_sessions` in the mount: use `-v "$(pwd):/app/eval_sessions"` and keep **`--dataset-dir eval_sessions/<timestamp>`** (paths are still relative to **`/app`** in the container).
+
+Reviewer shortcuts:
+
+- `n` / right arrow: next image
+- `p` / left arrow: previous image
+- `a`: add face box (ROI selector)
+- `x`: delete last box
+- `c`: clear boxes for current image
+- `s`: save now
+- `q`: quit (auto-saves pending edits)
+
+`labels.csv` format (`filename,x,y,w,h` — one row per face):
+
+```csv
+filename,x,y,w,h
+track_00042.jpg,320,140,180,180
+```
+
+Optional: `--iou-threshold 0.5` on `benchmark_detectors.py`.
+
+**Methodology notes**
+
+- Metrics pool TP/FP/FN over the dataset → precision/recall/F1 (not full mAP).
+- Images with **no** rows in `labels.csv` are treated as **zero faces** in GT (any detection → FP). Either label every frame that contains a face or remove empty-negative frames from the folder before benchmarking.
+- Latency is wall time per image per detector; keep Jetson power mode consistent between runs.
+
+### Artifacts for your report
+
+- `report_artifacts/detector_metrics.csv`
+- `report_artifacts/detector_comparison.png`
+- `report_artifacts/qualitative_examples/*.jpg`
+
+## Optional: static-only capture (no tracking)
+
+If you want frames **without** moving servos, use `capture_eval_dataset.py` in a **separate** run when nothing else uses the camera (`python3 src/capture_eval_dataset.py --help`).
+
+CSI problems (`Failed to create CaptureSession`): on the host run `sudo systemctl restart nvargus-daemon`, stop other camera apps, try `--width 1920 --height 1080 --fps 30`, or `--camera v4l2` with Docker `--device /dev/video0`. The script can fall back to V4L2 after CSI failure unless `--no-fallback-v4l2`.
+
+## Suggested report narrative
+
+1. **Data**: live tracking session → saved frames under `eval_sessions/…`.
+2. **Ground truth**: how `labels.csv` was produced (DNN seed + manual review recommended).
+3. **Metrics**: table/chart from `benchmark_detectors.py` comparing Haar, dlib HOG+SVM, OpenCV DNN.
+4. **Qualitative**: overlays + landmark screenshots from live stream.
+
+## One-line workflow recap
+
+1. `python3 src/main.py --eval-session …` (track + save frames)
+2. `prelabel_dataset.py` → `review_labels.py` on that session folder
+3. `benchmark_detectors.py --dataset-dir … --labels-csv …`
 
 ## Serial Protocol
 
@@ -180,39 +301,47 @@ Python sends:
 - `PAN:<angle>`
 - `TILT:<angle>`
 
-Arduino constrains angles to:
+Arduino constraints:
 
 - Pan: `0..180`
 - Tilt: `40..140`
 
 ## Troubleshooting
 
-- Arduino not found:
-  - Set `ARDUINO_PORT` in `src/config.py` (example: `/dev/ttyACM0`)
-  - Check cable and permissions
-- Camera cannot open:
-  - Confirm CSI camera and Jetson camera stack are available
-  - Verify Docker has required device/runtime access
-- Tracking jitters:
-  - Increase `DEAD_ZONE`
-  - Increase `SMOOTH_FRAMES`
-  - Reduce `PAN_KP`/`TILT_KP`
-  - Increase `PAN_KD`/`TILT_KD`
-- Slow response:
-  - Increase `KP` slightly
-  - Reduce `SMOOTH_FRAMES`
-  - Increase `MAX_SERVO_DELTA_PER_FRAME`
+- `ModuleNotFoundError: No module named 'dlib'` when running `python3 src/main.py` **on the host**:
+  - The Docker image installs `dlib`; a bare Jetson Python environment does not. Either run inside Docker, or use **system NumPy/Matplotlib** (fastest on Jetson) plus pip for the rest:
 
-## Safety Notes
+```bash
+sudo apt-get update && sudo apt-get install -y \
+  cmake build-essential libopenblas-base liblapack-dev \
+  python3-numpy python3-matplotlib
+pip3 install --user packaging setuptools wheel
+pip3 install --user -r requirements.txt
+```
 
-- Keep clear of moving pan-tilt mechanism while powered.
-- Use adequate servo power supply.
-- Start with conservative gains before aggressive tuning.
+  For **`benchmark_detectors.py`** plots only: if `python3-matplotlib` is not enough, try `pip3 install --user -r requirements-report.txt` (may compile — Docker avoids this issue).
 
-## Features Implemented for this small project - courtesy of Computer Controlled Manufacturing school project
+- **`pip install matplotlib` / NumPy fails from source** (Python 3.6 / Jetson):
+  - Do **not** pull NumPy/Matplotlib via pip on the host; use **`sudo apt-get install python3-numpy python3-matplotlib`** and keep them out of `requirements.txt`.
 
-- Face lock mode: implemented and stabilized
-- Patrol mode: implemented
-- Motion tracking mode: implemented
-- Shared MJPEG preview stream: implemented
+- `ModuleNotFoundError: No module named 'packaging'` while **`pip3 install dlib`**:
+  - Install tooling first, then use the pinned version from this repo (Jetson + Python 3.6 is unreliable with `dlib` 20.x):
 
+```bash
+pip3 install --user packaging setuptools wheel
+pip3 install --user -r requirements.txt
+```
+
+- `RuntimeError: Unable to open shape_predictor...`:
+  - Ensure first run had internet access for model download
+- Dlib install fails in container:
+  - rebuild image after Dockerfile changes (`cmake`, `build-essential`)
+- `ImportError: libcublas.so.10` (or similar) on **`import cv2`** inside Docker:
+  - The image’s OpenCV needs Jetson CUDA user-space libraries. Run with **`--runtime=nvidia`** (see **Docker: prelabel, review, and benchmark**). Alternatively run `python3 src/prelabel_dataset.py` / `benchmark_detectors.py` **on the host** with APT OpenCV if you prefer not to start the GPU stack for offline jobs.
+- OpenCV DNN backend falls back to CPU:
+  - set `-e OPENCV_DNN_TARGET=cpu` explicitly if CUDA backend is unavailable in your OpenCV build
+  - verify with `tegrastats` during runtime (GPU load should rise in CUDA mode)
+- No serial port:
+  - pass correct `--device` and/or set `ARDUINO_PORT` in `src/config.py`
+- Tracking oscillation:
+  - reduce `PAN_KP` / `TILT_KP`, increase `PAN_KD` / `TILT_KD`

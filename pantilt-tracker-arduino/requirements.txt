@@ -1,2 +1,8 @@
+# Tracker + scripting on Jetson host / Docker (avoid compiling numpy/matplotlib here).
+# On Ubuntu/Jetson host also install: sudo apt-get install python3-numpy python3-matplotlib
+packaging
+setuptools
+wheel
 pyserial
 imutils==0.5.4
+dlib==19.24.2
